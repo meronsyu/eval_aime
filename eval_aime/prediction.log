@@ -1,0 +1,25 @@
+nohup: ignoring input
+Error executing job with overrides: []
+Traceback (most recent call last):
+  File "/home/Competition2025/P12/P12U007/eval_hle/eval_hle/predict.py", line 13, in main
+    vllm_predictions.main(cfg)
+  File "/home/Competition2025/P12/P12U007/eval_hle/eval_hle/hle_benchmark/vllm_predictions.py", line 131, in main
+    dataset = load_dataset(args.dataset, split="test")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/Competition2025/P12/P12U007/.conda/envs/llmbench/lib/python3.12/site-packages/datasets/load.py", line 1392, in load_dataset
+    builder_instance = load_dataset_builder(
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/Competition2025/P12/P12U007/.conda/envs/llmbench/lib/python3.12/site-packages/datasets/load.py", line 1166, in load_dataset_builder
+    builder_instance: DatasetBuilder = builder_cls(
+                                       ^^^^^^^^^^^^
+  File "/home/Competition2025/P12/P12U007/.conda/envs/llmbench/lib/python3.12/site-packages/datasets/builder.py", line 343, in __init__
+    self.config, self.config_id = self._create_builder_config(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/Competition2025/P12/P12U007/.conda/envs/llmbench/lib/python3.12/site-packages/datasets/builder.py", line 524, in _create_builder_config
+    raise ValueError(
+ValueError: Config name is missing.
+Please pick one among the available configs: ['AIME2025-I', 'AIME2025-II']
+Example of usage:
+	`load_dataset('opencompass/AIME2025', 'AIME2025-I')`
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
