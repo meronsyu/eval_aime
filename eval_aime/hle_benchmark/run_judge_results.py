@@ -33,14 +33,16 @@ from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 from datasets import load_dataset
 from datetime import datetime
+import re
+from datasets import concatenate_datasets
+import hashlib
 
-# 非同期処理
 client = AsyncOpenAI(
-    timeout=300.0,
-    max_retries=1,
-    api_key=os.environ.get("OPENAI_API_KEY"),
-)
-
+            timeout=300.0,
+            max_retries=1,
+            base_url="http://localhost:8000/v1",
+            api_key="fakeapikey",
+        )
 
 # 回答、reasoning、cofidenceの妥当性を図る
 JUDGE_PROMPT = """Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
@@ -179,23 +181,12 @@ def calib_err(confidence, correct, p='2', beta=50):
 def dump_metrics(args, predictions, total_questions, all_questions):
     correct = []
     confidence = []
-    correct_by_category = {
-        "Math": [], # 41%
-        "Physics": [], # 9%
-        "Biology/Medicine": [], # 11%
-        "Humanities/Social Science": [], # 9%
-        "Computer Science/AI": [], # 10%
-        "Engineering": [], # 4%
-        "Chemistry": [], # 7%
-        "Other": [], # 9%
-    }
     for k, v in predictions.items():
         data = next(filter(lambda x: x["id"] == k, all_questions))
         if "judge_response" in v:
             judge_response = v["judge_response"]
             correct.append("yes" in judge_response["correct"])
             confidence.append(judge_response["confidence"])
-            correct_by_category[data["category"]].append("yes" in judge_response["correct"])
         else:
             print(f"Missing judge response for {k}, you should rerun the judge")
 
@@ -217,26 +208,14 @@ def dump_metrics(args, predictions, total_questions, all_questions):
     print(f"Accuracy: {accuracy}% +/- {confidence_half_width}% | n = {n}")
     print(f"Calibration Error: {calibration_error}")
 
-    print("\n*** Accuracy Per Category ***") # ここから追加
-    for category, results_list in correct_by_category.items():
-        num_correct = sum(results_list) # Trueの数を数える
-        num_total = len(results_list)   # そのカテゴリの総質問数
-
-        if num_total > 0:
-            print(f"- {category}: {num_correct} / {num_total} ({round(num_correct / num_total * 100, 2)}%)")
-        else:
-            print(f"- {category}: No questions evaluated in this category.")
-    print("*****************************") # ここまで追加
-
     results = []
+    print(predictions)
     for k,v in predictions.items():
         data = next(filter(lambda x: x["id"] == k, all_questions))
         results.append({
             "id": k,
-            "category": data["category"],
             "question": data["question"],
             "user_prompt": "", # TODO
-            "answer_type": data["answer_type"],
             "prediction": v["judge_response"]["model_answer"],
             "gold": v["judge_response"]["correct_answer"],
             "correct": 1 if v["judge_response"]["correct"] == "yes" else 0,
@@ -246,16 +225,6 @@ def dump_metrics(args, predictions, total_questions, all_questions):
     summary = {
         "model_name": predictions[k]["model"],
         "overall_accuracy": accuracy,
-        "accuracy_per_category": {
-            "Math": sum(correct_by_category["Math"]) / len(correct_by_category["Math"]) * 100 if len(correct_by_category["Math"]) else None,
-            "Physics": sum(correct_by_category["Physics"]) / len(correct_by_category["Physics"]) * 100 if len(correct_by_category["Physics"]) else None,
-            "Biology/Medicine": sum(correct_by_category["Biology/Medicine"]) / len(correct_by_category["Biology/Medicine"]) * 100 if len(correct_by_category["Biology/Medicine"]) else None,
-            "Humanities/Social Science": sum(correct_by_category["Humanities/Social Science"]) / len(correct_by_category["Humanities/Social Science"]) * 100 if len(correct_by_category["Humanities/Social Science"]) else None,
-            "Computer Science/AI": sum(correct_by_category["Computer Science/AI"]) / len(correct_by_category["Computer Science/AI"]) * 100 if len(correct_by_category["Computer Science/AI"]) else None,
-            "Engineering": sum(correct_by_category["Engineering"]) / len(correct_by_category["Engineering"]) * 100 if len(correct_by_category["Engineering"]) else None,
-            "Chemistry": sum(correct_by_category["Chemistry"]) / len(correct_by_category["Chemistry"]) * 100 if len(correct_by_category["Chemistry"]) else None,
-            "Other": sum(correct_by_category["Other"]) / len(correct_by_category["Other"]) * 100 if len(correct_by_category["Other"]) else None,
-        },
         "num_questions": n,
         "timestamp": datetime.now().isoformat(),
     }
@@ -267,157 +236,64 @@ def dump_metrics(args, predictions, total_questions, all_questions):
     with open(output_folder_name + "/summary.json", "w") as f:
         json.dump(summary, f, indent=4) 
 
-
-def dump_metrics_by_confidence_and_category(args, predictions, total_questions, all_questions):
-    """
-    Calculates metrics by confidence bins and categories and prints the results to the console.
-    """
-    confidence_bins = {
-        "0-20%": {"categories": {}, "total_in_bin": 0, "correct_in_bin": 0},
-        "20-40%": {"categories": {}, "total_in_bin": 0, "correct_in_bin": 0},
-        "40-60%": {"categories": {}, "total_in_bin": 0, "correct_in_bin": 0},
-        "60-80%": {"categories": {}, "total_in_bin": 0, "correct_in_bin": 0},
-        "80-100%": {"categories": {}, "total_in_bin": 0, "correct_in_bin": 0},
-    }
-
-    categories = {
-        "Math": [], # 41%
-        "Physics": [], # 9%
-        "Biology/Medicine": [], # 11%
-        "Humanities/Social Science": [], # 9%
-        "Computer Science/AI": [], # 10%
-        "Engineering": [], # 4%
-        "Chemistry": [], # 7%
-        "Other": [], # 9%
-    }
-
-    for bin_name in confidence_bins:
-        for category in categories:
-            confidence_bins[bin_name]["categories"][category] = {"num_samples": 0, "num_correct": 0}
-
-    # 集計処理
-    for q_id, pred in predictions.items():
-        if "judge_response" in pred:
-            judge_response = pred["judge_response"]
-            confidence_score = judge_response["confidence"]
-            is_correct = ("yes" in judge_response["correct"])
-
-            # 予測結果に対応する質問データを取得
-            question_data = next((q for q in all_questions if q["id"] == q_id), None)
-            if not question_data:
-                continue
-            category = question_data["category"]
-
-            bin_name = None
-            if 0 <= confidence_score < 20:
-                bin_name = "0-20%"
-            elif 20 <= confidence_score < 40:
-                bin_name = "20-40%"
-            elif 40 <= confidence_score < 60:
-                bin_name = "40-60%"
-            elif 60 <= confidence_score < 80:
-                bin_name = "60-80%"
-            elif 80 <= confidence_score <= 100:
-                bin_name = "80-100%"
-
-            if bin_name:
-                confidence_bins[bin_name]["categories"][category]["num_samples"] += 1
-                confidence_bins[bin_name]["total_in_bin"] += 1
-                if is_correct:
-                    confidence_bins[bin_name]["categories"][category]["num_correct"] += 1
-                    confidence_bins[bin_name]["correct_in_bin"] += 1
-
-    # コンソール出力
-    for bin_name, bin_data in confidence_bins.items():
-        total_samples = bin_data["total_in_bin"]
-
-        if total_samples > 0:
-            print(f"\n*** Accuracy for Confidence {bin_name} ***")
-            for category in categories:
-                cat_data = bin_data["categories"][category]
-                num_correct = cat_data["num_correct"]
-                num_total = cat_data["num_samples"]
-                accuracy = round(num_correct / num_total * 100, 2) if num_total > 0 else 0.0
-                
-                print(f"- {category}: {num_correct} / {num_total} ({accuracy}%)")
-            print("*************************************")
-        else:
-            print(f"\n*** No predictions in Confidence Bin {bin_name} ***")
-            print("*************************************")
-
-def dump_metrics_by_raw_subject(args, predictions, all_questions):
-    """
-    Calculates and prints accuracy per raw subject based on judged predictions.
-    """
-    correct_by_raw_subject = {}
-
-    # raw_subjectのリストを動的に生成
-    raw_subjects = sorted(list(set(q["raw_subject"] for q in all_questions if "raw_subject" in q)))
-
-    for subject in raw_subjects:
-        correct_by_raw_subject[subject] = {"num_samples": 0, "num_correct": 0}
-
-    for q_id, pred in predictions.items():
-        if "judge_response" in pred:
-            judge_response = pred["judge_response"]
-            is_correct = ("yes" in judge_response["correct"])
-            
-            question_data = next((q for q in all_questions if q["id"] == q_id), None)
-            if not question_data:
-                continue
-            
-            subject = question_data.get("raw_subject")
-            if subject and subject in correct_by_raw_subject:
-                correct_by_raw_subject[subject]["num_samples"] += 1
-                if is_correct:
-                    correct_by_raw_subject[subject]["num_correct"] += 1
-
-    # サンプル数が多いもの事にソート
-    raw_subjects = sorted(
-        correct_by_raw_subject.keys(),
-        key=lambda s: correct_by_raw_subject[s]["num_samples"],
-        reverse=True
-    )
-    print("\n*** Accuracy Per Raw Subject ***")
-    for subject in raw_subjects:
-        results_data = correct_by_raw_subject[subject]
-        num_correct = results_data["num_correct"]
-        num_total = results_data["num_samples"]
-
-        if num_total > 0:
-            accuracy = round(num_correct / num_total * 100, 2)
-            print(f"- {subject}: {num_correct} / {num_total} ({accuracy}%)")
-        else:
-            print(f"- {subject}: No questions evaluated in this raw subject.")
-    print("*****************************")
+def reproducible_hash(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 def main(args):
+    
     assert args.num_workers > 1, "num_workers must be 2 or greater"
 
-    output_filepath = f"judged/judged_hle_{os.path.basename(args.model)}.json"   
-    dataset = load_dataset(args.dataset, split="test").to_dict() 
+    output_filepath = f"judged/judged_AIME_{os.path.basename(args.model)}.json"   
+    if args.dataset == "opencompass/AIME2025":
+        dataset_a = load_dataset(args.dataset, "AIME2025-I", split="test")
+        dataset_b = load_dataset(args.dataset, "AIME2025-II", split="test")
+        dataset = concatenate_datasets([dataset_a,dataset_b])
+        dataset = dataset.select(range(3))
+    dataset = dataset.to_dict()
+    
+
     # convert to list of json for async parallelism
     all_questions = [dict(zip(dataset.keys(), values)) for values in zip(*dataset.values())]
-
+    for q in all_questions:
+        # questionテキストをハッシュ化してidとして使用
+        q['id'] = reproducible_hash(q['question']) 
+        
     total_questions = len(all_questions)
 
     # output_filepath のディレクトリ部分を取得
     output_dir = os.path.dirname(output_filepath)
     # ディレクトリが存在しない場合に作成
     os.makedirs(output_dir, exist_ok=True) 
+
     # todo:今回カテゴリごとにばらばらに予測を行ったから貼り付ける必要あり。
-    with open(f"predictions/hle_Qwen3-32B_20250804_173315.json", "r") as f:
+    with open(f"predictions/hle_Qwen3-32B_20250805_132838.json", "r") as f:
         predictions = json.load(f)
 
-     # Qwen3 will be called for unjudged responses
-    results = asyncio.run(judge_all_responses(args, all_questions, predictions))
+     # load only unjudged responses
+    # if os.path.exists(output_filepath):
+    #     with open(output_filepath, "r") as f:
+    #         judged_predictions = json.load(f)
+    # else:
+    judged_predictions = {}
+    
+    questions = [q for q in all_questions if q["id"] in predictions and q["id"] not in judged_predictions]
+    
+     # API will only be called for unjudged responses
+    results = asyncio.run(judge_all_responses(args, questions, predictions))
+    
+    for unique_id, predictions in results:
+        print(unique_id, predictions)
+        if unique_id is not None:
+            judged_predictions[unique_id] = predictions
 
     # cache judge output
     with open(output_filepath, "w") as f:
-        json.dump(results, f, indent=4)
+        json.dump(judged_predictions, f, indent=4)
 
     dump_metrics(args, judged_predictions, total_questions, all_questions)
 
-    dump_metrics_by_confidence_and_category(args, judged_predictions, total_questions, all_questions)
 
-    dump_metrics_by_raw_subject(args, judged_predictions, all_questions)
+
+
+
+

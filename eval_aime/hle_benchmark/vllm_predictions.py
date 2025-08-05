@@ -25,10 +25,13 @@ import os
 import json
 import asyncio
 from datasets import load_dataset
+from datasets import concatenate_datasets
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 from hle_benchmark._configs import Config
 import datetime # datetimeモジュールをインポート
+import hashlib
+
 
 
 SYSTEM_EXACT_ANSWER = "Your response should be in the following format:\nExplanation: {your explanation for your final answer}\nExact Answer: {your succinct, final answer}\nConfidence: {your confidence score between 0% and 100% for your answer}"
@@ -37,16 +40,11 @@ SYSTEM_MC = "Your response should be in the following format:\nExplanation: {you
 
 
 def format_message(args, question):
-    answer_type = question['answer_type']
-    system_prompt = SYSTEM_EXACT_ANSWER if answer_type == 'exact_match' else SYSTEM_MC
+    system_prompt = SYSTEM_EXACT_ANSWER 
     question_text = question['question']
 
     text_content = dict(type="text", text=question_text)
-    if question['image']: # "" if not multi-modal
-        image_content = dict(type="image_url", image_url=dict(url=question['image']))
-        content = [text_content, image_content]
-    else:
-        content = [text_content]
+    content = [text_content]
 
     system_role = "user" if "o1" in args.model else "system" # o1 no sys prompt
     messages = [
@@ -55,6 +53,9 @@ def format_message(args, question):
     ]
     return messages
 
+
+def reproducible_hash(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 async def attempt_question(args, question):
     messages = format_message(args, question)
@@ -118,6 +119,7 @@ async def attempt_all(args, questions, predictions, output_filepath):
     
     return results
 
+
 def main(args: Config):
     global client
     client = AsyncOpenAI(
@@ -128,32 +130,22 @@ def main(args: Config):
     )
 
     assert args.num_workers > 1, "num_workers must be 2 or greater"
-    dataset = load_dataset(args.dataset, split="test")
-    # 画像フィルタ
-    dataset = dataset.filter(lambda item: item['image'] == "")
-
-    # カテゴリをフィルタ
-    if args.category_filter:
-        category_filters_lower = [c.lower() for c in args.category_filter]
-        dataset = dataset.filter(lambda item: item["category"].lower() in category_filters_lower)
+    if args.dataset == "opencompass/AIME2025":
+        dataset_a = load_dataset(args.dataset, "AIME2025-I", split="test")
+        dataset_b = load_dataset(args.dataset, "AIME2025-II", split="test")
+        dataset = concatenate_datasets([dataset_a,dataset_b])
+        dataset = dataset.select(range(3))
 
     # dataset = dataset.select(range(3))
     dataset = dataset.to_dict()
 
     # convert to list of json for async parallelism
     questions = [dict(zip(dataset.keys(), values)) for values in zip(*dataset.values())]
-    
-    # 同じ問題は解かないためのフィルタリング機能
-    # 設定したpredictionファイルについて被りがないように問題をフィルタ
-    if args.duplicate_filter:
-        # load only questions without responses
-        if os.path.exists(args.duplicate_file):
-            with open(args.duplicate_file, "r") as f:
-                predictions = json.load(f)
-            questions = [q for q in questions if q["id"] not in predictions]
-        else:
-            print("args.duplicate_fileの設定が間違っている")
 
+    for q in questions:
+        # questionテキストをハッシュ化してidとして使用
+        q['id'] = reproducible_hash(q['question']) 
+        print(q)
     # If max_samples is set, limit the number of questions
     if args.max_samples:
         questions = questions[:args.max_samples]
